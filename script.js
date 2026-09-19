@@ -231,6 +231,7 @@ function setupEventListeners() {
 
     document.getElementById('saveBtn').addEventListener('click', saveData);
     document.getElementById('loadBtn').addEventListener('click', () => fileInput.click());
+    document.getElementById('exportBtn').addEventListener('click', exportMonthAsPNG);
     fileInput.addEventListener('change', loadData);
 
     // --- Event delegation for day boxes ---
@@ -327,6 +328,232 @@ function loadData(e) {
     };
     reader.readAsText(file);
     fileInput.value = '';
+}
+
+// --- PNG Export ---
+
+// Shared helper: wrap an image load in a promise so we can await it.
+// ctx.drawImage requires a fully decoded image, so every background
+// image must be loaded before we start drawing.
+function loadImage(src) {
+    return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.onerror = () => reject(new Error('Failed to load image'));
+        img.src = src;
+    });
+}
+
+// Shared helper: take a Blob and a filename, use the File System Access API
+// if available, otherwise fall back to a download link. Mirrors the logic
+// in saveData() so both save paths behave consistently.
+async function saveBlob(blob, filename, description, accept) {
+    if (window.showSaveFilePicker) {
+        try {
+            const handle = await window.showSaveFilePicker({
+                suggestedName: filename,
+                types: [{ description, accept }],
+            });
+            const writable = await handle.createWritable();
+            await writable.write(blob);
+            await writable.close();
+            return;
+        } catch (err) {
+            // User cancelled — bail silently, same as saveData()
+            if (err.name === 'AbortError') return;
+            console.error('Save failed', err);
+        }
+    }
+
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+}
+
+// Main export: re-draws the current month onto a canvas at 2x scale and
+// saves it as a PNG. This does NOT screenshot the DOM — it reads from
+// calendarData and redraws. If you change how the grid looks in CSS,
+// update the drawing constants below to match.
+async function exportMonthAsPNG() {
+    const monthNames = ["January", "February", "March", "April", "May", "June",
+                        "July", "August", "September", "October", "November", "December"];
+    const monthLabel = `${monthNames[currentMonth]} ${currentYear}`;
+
+    const monthData = (calendarData[currentYear] && calendarData[currentYear][currentMonth]) || {};
+    const daysInMonth = new Date(currentYear, currentMonth + 1, 0).getDate();
+    const firstDayIndex = new Date(currentYear, currentMonth, 1).getDay();
+
+    // --- Geometry (all in CSS pixels, then scaled by DPR-ish factor) ---
+    const SCALE = 2;
+    const CANVAS_WIDTH = 1400;
+    const PADDING = 60;
+    const HEADER_HEIGHT = 110;
+    const WEEKDAY_HEIGHT = 40;
+    const GAP = 10;
+    const COLS = 7;
+
+    const contentWidth = CANVAS_WIDTH - PADDING * 2;
+    const cellWidth = (contentWidth - GAP * (COLS - 1)) / COLS;
+    const cellHeight = cellWidth * (9 / 16); // match aspect-ratio: 16/9
+
+    // Total rows = leading empty slots + days, rounded up to full weeks
+    const totalSlots = firstDayIndex + daysInMonth;
+    const rows = Math.ceil(totalSlots / COLS);
+
+    const gridHeight = rows * cellHeight + (rows - 1) * GAP;
+    const CANVAS_HEIGHT = PADDING + HEADER_HEIGHT + WEEKDAY_HEIGHT + gridHeight + PADDING;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = CANVAS_WIDTH * SCALE;
+    canvas.height = CANVAS_HEIGHT * SCALE;
+    const ctx = canvas.getContext('2d');
+    ctx.scale(SCALE, SCALE);
+
+    // --- Preload all images in parallel ---
+    // We build a map of dateKey -> HTMLImageElement (or null on failure)
+    // BEFORE drawing, so nothing gets drawn half-loaded.
+    const dateKeys = [];
+    for (let day = 1; day <= daysInMonth; day++) {
+        const dateKey = `${currentYear}-${String(currentMonth + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+        dateKeys.push(dateKey);
+    }
+
+    const loadedImages = {};
+    await Promise.all(dateKeys.map(async (dateKey) => {
+        const src = monthData[dateKey];
+        if (!src) {
+            loadedImages[dateKey] = null;
+            return;
+        }
+        try {
+            loadedImages[dateKey] = await loadImage(src);
+        } catch (err) {
+            console.warn(`Skipping unloadable image for ${dateKey}`, err);
+            loadedImages[dateKey] = null;
+        }
+    }));
+
+    // --- Draw ---
+
+    // Background
+    ctx.fillStyle = '#f5f3ee';
+    ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+    // Title
+    ctx.fillStyle = '#1e1e1e';
+    ctx.font = 'bold 44px "Segoe UI", Tahoma, Geneva, Verdana, sans-serif';
+    ctx.textBaseline = 'top';
+    ctx.fillText(monthLabel, PADDING, PADDING);
+
+    // Thin rule under title
+    ctx.strokeStyle = '#c9c4b8';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(PADDING, PADDING + HEADER_HEIGHT - 20);
+    ctx.lineTo(CANVAS_WIDTH - PADDING, PADDING + HEADER_HEIGHT - 20);
+    ctx.stroke();
+
+    // Weekday labels
+    const weekdays = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
+    ctx.fillStyle = '#8a8578';
+    ctx.font = 'bold 14px "Segoe UI", Tahoma, Geneva, Verdana, sans-serif';
+    ctx.textAlign = 'center';
+    const weekdayY = PADDING + HEADER_HEIGHT;
+    for (let i = 0; i < COLS; i++) {
+        const cellX = PADDING + i * (cellWidth + GAP) + cellWidth / 2;
+        ctx.fillText(weekdays[i], cellX, weekdayY + 8);
+    }
+    ctx.textAlign = 'left'; // reset
+
+    // Grid origin
+    const gridY = PADDING + HEADER_HEIGHT + WEEKDAY_HEIGHT;
+
+    // Draw cells
+    for (let day = 1; day <= daysInMonth; day++) {
+        const slot = firstDayIndex + day - 1;
+        const row = Math.floor(slot / COLS);
+        const col = slot % COLS;
+        const x = PADDING + col * (cellWidth + GAP);
+        const y = gridY + row * (cellHeight + GAP);
+
+        const dateKey = `${currentYear}-${String(currentMonth + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+        const img = loadedImages[dateKey];
+
+        if (img) {
+            // Clip to rounded rect, then draw the image cover-fit
+            drawRoundedRect(ctx, x, y, cellWidth, cellHeight, 8);
+            ctx.save();
+            ctx.clip();
+
+            // Cover-fit: scale so image fills the cell, center it
+            const imgAspect = img.width / img.height;
+            const cellAspect = cellWidth / cellHeight;
+            let drawW, drawH, drawX, drawY;
+            if (imgAspect > cellAspect) {
+                // Image is wider — fit height, crop sides
+                drawH = cellHeight;
+                drawW = cellHeight * imgAspect;
+                drawX = x - (drawW - cellWidth) / 2;
+                drawY = y;
+            } else {
+                // Image is taller — fit width, crop top/bottom
+                drawW = cellWidth;
+                drawH = cellWidth / imgAspect;
+                drawX = x;
+                drawY = y - (drawH - cellHeight) / 2;
+            }
+            ctx.drawImage(img, drawX, drawY, drawW, drawH);
+            ctx.restore();
+
+            // Faint scrim behind the day number for legibility
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
+            ctx.beginPath();
+            ctx.arc(x + 22, y + 22, 14, 0, Math.PI * 2);
+            ctx.fill();
+        } else {
+            // Empty cell: outlined box
+            ctx.strokeStyle = '#d8d3c7';
+            ctx.lineWidth = 1.5;
+            drawRoundedRect(ctx, x + 0.75, y + 0.75, cellWidth - 1.5, cellHeight - 1.5, 8);
+            ctx.stroke();
+        }
+
+        // Day number on top
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 16px "Segoe UI", Tahoma, Geneva, Verdana, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(String(day), x + 22, y + 23);
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+    }
+
+    // --- Save ---
+    const filename = `asmr_calendar_${currentYear}-${String(currentMonth + 1).padStart(2, '0')}.png`;
+    canvas.toBlob(async (blob) => {
+        if (!blob) {
+            alert('Failed to generate PNG.');
+            return;
+        }
+        await saveBlob(blob, filename, 'PNG Image', { 'image/png': ['.png'] });
+    }, 'image/png');
+}
+
+// Small helper: trace a rounded rectangle path on the given context.
+// Needed because ctx.roundRect isn't universally supported yet.
+function drawRoundedRect(ctx, x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
 }
 
 // Start the app
