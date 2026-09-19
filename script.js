@@ -11,6 +11,10 @@ let targetDateKey = null;
 let targetDayBox = null;
 let imageInput = null; 
 
+// Context menu state
+let contextMenu = null;
+let contextMenuDateKey = null;
+
 // Year scroller config
 const YEAR_RANGE_START = new Date().getFullYear() - 10;
 const YEAR_RANGE_END = new Date().getFullYear() + 10;
@@ -104,7 +108,7 @@ function renderCalendar(animate = true, direction = 'next') {
             label.style.opacity = '0.5'; 
         }
 
-        // NOTE: click listeners are handled via event delegation in setupEventListeners()
+        // NOTE: click/contextmenu listeners are handled via event delegation
         newGrid.appendChild(dayBox);
     }
 
@@ -144,19 +148,19 @@ function renderCalendar(animate = true, direction = 'next') {
 // --- Image Handling & Animations ---
 
 function handleDayClick(event, dateKey, targetBox) {
-    // Check if user is holding Shift to quickly paste the last image
     if (event.shiftKey && activeClipboardImage) {
         applyImageToBox(dateKey, targetBox, activeClipboardImage);
         return;
     }
 
-    // Otherwise, prep global variables and trigger immediate upload
     targetDateKey = dateKey;
     targetDayBox = targetBox;
     imageInput.click();
 }
 
 function applyImageToBox(dateKey, targetBox, base64Image) {
+    if (!calendarData[currentYear]) calendarData[currentYear] = {};
+    if (!calendarData[currentYear][currentMonth]) calendarData[currentYear][currentMonth] = {};
     calendarData[currentYear][currentMonth][dateKey] = base64Image;
 
     const rect = targetBox.getBoundingClientRect();
@@ -223,10 +227,12 @@ function setupEventListeners() {
         yearDropdown.classList.toggle('show');
     });
 
+    // Close the year dropdown and context menu when clicking anywhere
     window.addEventListener('click', () => {
         if (yearDropdown.classList.contains('show')) {
             yearDropdown.classList.remove('show');
         }
+        hideContextMenu();
     });
 
     document.getElementById('saveBtn').addEventListener('click', saveData);
@@ -234,15 +240,35 @@ function setupEventListeners() {
     document.getElementById('exportBtn').addEventListener('click', exportMonthAsPNG);
     fileInput.addEventListener('change', loadData);
 
-    // --- Event delegation for day boxes ---
-    // Single listener on the persistent #calendarGrid container.
-    // Since only grid.innerHTML is replaced during renders, this listener
-    // survives every re-render and reaches all current day boxes.
+    // --- Delegated left-click for day boxes ---
     grid.addEventListener('click', (e) => {
         const box = e.target.closest('.day-box');
         if (!box || box.classList.contains('empty') || !box.dataset.dateKey) return;
         handleDayClick(e, box.dataset.dateKey, box);
     });
+
+    // --- Delegated right-click for day boxes ---
+    grid.addEventListener('contextmenu', (e) => {
+        const box = e.target.closest('.day-box');
+        if (!box || box.classList.contains('empty') || !box.dataset.dateKey) return;
+        e.preventDefault();
+        e.stopPropagation();
+        showContextMenu(e.clientX, e.clientY, box.dataset.dateKey);
+    });
+
+    // Close context menu if right-clicking somewhere else
+    window.addEventListener('contextmenu', (e) => {
+        if (contextMenu && contextMenu.classList.contains('show') && !contextMenu.contains(e.target)) {
+            hideContextMenu();
+        }
+    }, true);
+
+    // Dismiss on Escape, scroll, or tab blur
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') hideContextMenu();
+    });
+    window.addEventListener('scroll', hideContextMenu, true);
+    window.addEventListener('blur', hideContextMenu);
 }
 
 // --- Year Scroller Logic ---
@@ -330,23 +356,8 @@ function loadData(e) {
     fileInput.value = '';
 }
 
-// --- PNG Export ---
+// --- Shared Blob Save Helper ---
 
-// Shared helper: wrap an image load in a promise so we can await it.
-// ctx.drawImage requires a fully decoded image, so every background
-// image must be loaded before we start drawing.
-function loadImage(src) {
-    return new Promise((resolve, reject) => {
-        const img = new Image();
-        img.onload = () => resolve(img);
-        img.onerror = () => reject(new Error('Failed to load image'));
-        img.src = src;
-    });
-}
-
-// Shared helper: take a Blob and a filename, use the File System Access API
-// if available, otherwise fall back to a download link. Mirrors the logic
-// in saveData() so both save paths behave consistently.
 async function saveBlob(blob, filename, description, accept) {
     if (window.showSaveFilePicker) {
         try {
@@ -359,7 +370,6 @@ async function saveBlob(blob, filename, description, accept) {
             await writable.close();
             return;
         } catch (err) {
-            // User cancelled — bail silently, same as saveData()
             if (err.name === 'AbortError') return;
             console.error('Save failed', err);
         }
@@ -375,10 +385,17 @@ async function saveBlob(blob, filename, description, accept) {
     URL.revokeObjectURL(url);
 }
 
-// Main export: re-draws the current month onto a canvas at 2x scale and
-// saves it as a PNG. This does NOT screenshot the DOM — it reads from
-// calendarData and redraws. If you change how the grid looks in CSS,
-// update the drawing constants below to match.
+// --- PNG Export ---
+
+function loadImage(src) {
+    return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.onerror = () => reject(new Error('Failed to load image'));
+        img.src = src;
+    });
+}
+
 async function exportMonthAsPNG() {
     const monthNames = ["January", "February", "March", "April", "May", "June",
                         "July", "August", "September", "October", "November", "December"];
@@ -388,7 +405,6 @@ async function exportMonthAsPNG() {
     const daysInMonth = new Date(currentYear, currentMonth + 1, 0).getDate();
     const firstDayIndex = new Date(currentYear, currentMonth, 1).getDay();
 
-    // --- Geometry (all in CSS pixels, then scaled by DPR-ish factor) ---
     const SCALE = 2;
     const CANVAS_WIDTH = 1400;
     const PADDING = 60;
@@ -399,12 +415,10 @@ async function exportMonthAsPNG() {
 
     const contentWidth = CANVAS_WIDTH - PADDING * 2;
     const cellWidth = (contentWidth - GAP * (COLS - 1)) / COLS;
-    const cellHeight = cellWidth * (9 / 16); // match aspect-ratio: 16/9
+    const cellHeight = cellWidth * (9 / 16);
 
-    // Total rows = leading empty slots + days, rounded up to full weeks
     const totalSlots = firstDayIndex + daysInMonth;
     const rows = Math.ceil(totalSlots / COLS);
-
     const gridHeight = rows * cellHeight + (rows - 1) * GAP;
     const CANVAS_HEIGHT = PADDING + HEADER_HEIGHT + WEEKDAY_HEIGHT + gridHeight + PADDING;
 
@@ -414,9 +428,6 @@ async function exportMonthAsPNG() {
     const ctx = canvas.getContext('2d');
     ctx.scale(SCALE, SCALE);
 
-    // --- Preload all images in parallel ---
-    // We build a map of dateKey -> HTMLImageElement (or null on failure)
-    // BEFORE drawing, so nothing gets drawn half-loaded.
     const dateKeys = [];
     for (let day = 1; day <= daysInMonth; day++) {
         const dateKey = `${currentYear}-${String(currentMonth + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
@@ -426,10 +437,7 @@ async function exportMonthAsPNG() {
     const loadedImages = {};
     await Promise.all(dateKeys.map(async (dateKey) => {
         const src = monthData[dateKey];
-        if (!src) {
-            loadedImages[dateKey] = null;
-            return;
-        }
+        if (!src) { loadedImages[dateKey] = null; return; }
         try {
             loadedImages[dateKey] = await loadImage(src);
         } catch (err) {
@@ -438,19 +446,14 @@ async function exportMonthAsPNG() {
         }
     }));
 
-    // --- Draw ---
-
-    // Background
     ctx.fillStyle = '#f5f3ee';
     ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
 
-    // Title
     ctx.fillStyle = '#1e1e1e';
     ctx.font = 'bold 44px "Segoe UI", Tahoma, Geneva, Verdana, sans-serif';
     ctx.textBaseline = 'top';
     ctx.fillText(monthLabel, PADDING, PADDING);
 
-    // Thin rule under title
     ctx.strokeStyle = '#c9c4b8';
     ctx.lineWidth = 1;
     ctx.beginPath();
@@ -458,7 +461,6 @@ async function exportMonthAsPNG() {
     ctx.lineTo(CANVAS_WIDTH - PADDING, PADDING + HEADER_HEIGHT - 20);
     ctx.stroke();
 
-    // Weekday labels
     const weekdays = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
     ctx.fillStyle = '#8a8578';
     ctx.font = 'bold 14px "Segoe UI", Tahoma, Geneva, Verdana, sans-serif';
@@ -468,12 +470,10 @@ async function exportMonthAsPNG() {
         const cellX = PADDING + i * (cellWidth + GAP) + cellWidth / 2;
         ctx.fillText(weekdays[i], cellX, weekdayY + 8);
     }
-    ctx.textAlign = 'left'; // reset
+    ctx.textAlign = 'left';
 
-    // Grid origin
     const gridY = PADDING + HEADER_HEIGHT + WEEKDAY_HEIGHT;
 
-    // Draw cells
     for (let day = 1; day <= daysInMonth; day++) {
         const slot = firstDayIndex + day - 1;
         const row = Math.floor(slot / COLS);
@@ -485,23 +485,19 @@ async function exportMonthAsPNG() {
         const img = loadedImages[dateKey];
 
         if (img) {
-            // Clip to rounded rect, then draw the image cover-fit
             drawRoundedRect(ctx, x, y, cellWidth, cellHeight, 8);
             ctx.save();
             ctx.clip();
 
-            // Cover-fit: scale so image fills the cell, center it
             const imgAspect = img.width / img.height;
             const cellAspect = cellWidth / cellHeight;
             let drawW, drawH, drawX, drawY;
             if (imgAspect > cellAspect) {
-                // Image is wider — fit height, crop sides
                 drawH = cellHeight;
                 drawW = cellHeight * imgAspect;
                 drawX = x - (drawW - cellWidth) / 2;
                 drawY = y;
             } else {
-                // Image is taller — fit width, crop top/bottom
                 drawW = cellWidth;
                 drawH = cellWidth / imgAspect;
                 drawX = x;
@@ -510,20 +506,17 @@ async function exportMonthAsPNG() {
             ctx.drawImage(img, drawX, drawY, drawW, drawH);
             ctx.restore();
 
-            // Faint scrim behind the day number for legibility
             ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
             ctx.beginPath();
             ctx.arc(x + 22, y + 22, 14, 0, Math.PI * 2);
             ctx.fill();
         } else {
-            // Empty cell: outlined box
             ctx.strokeStyle = '#d8d3c7';
             ctx.lineWidth = 1.5;
             drawRoundedRect(ctx, x + 0.75, y + 0.75, cellWidth - 1.5, cellHeight - 1.5, 8);
             ctx.stroke();
         }
 
-        // Day number on top
         ctx.fillStyle = '#ffffff';
         ctx.font = 'bold 16px "Segoe UI", Tahoma, Geneva, Verdana, sans-serif';
         ctx.textAlign = 'center';
@@ -533,19 +526,13 @@ async function exportMonthAsPNG() {
         ctx.textBaseline = 'top';
     }
 
-    // --- Save ---
     const filename = `asmr_calendar_${currentYear}-${String(currentMonth + 1).padStart(2, '0')}.png`;
     canvas.toBlob(async (blob) => {
-        if (!blob) {
-            alert('Failed to generate PNG.');
-            return;
-        }
+        if (!blob) { alert('Failed to generate PNG.'); return; }
         await saveBlob(blob, filename, 'PNG Image', { 'image/png': ['.png'] });
     }, 'image/png');
 }
 
-// Small helper: trace a rounded rectangle path on the given context.
-// Needed because ctx.roundRect isn't universally supported yet.
 function drawRoundedRect(ctx, x, y, w, h, r) {
     ctx.beginPath();
     ctx.moveTo(x + r, y);
@@ -554,6 +541,146 @@ function drawRoundedRect(ctx, x, y, w, h, r) {
     ctx.arcTo(x, y + h, x, y, r);
     ctx.arcTo(x, y, x + w, y, r);
     ctx.closePath();
+}
+
+// --- Right-Click Context Menu ---
+
+function buildContextMenu() {
+    if (contextMenu) return;
+
+    contextMenu = document.createElement('div');
+    contextMenu.className = 'context-menu';
+    document.body.appendChild(contextMenu);
+
+    // Handle clicks on menu items via delegation
+    contextMenu.addEventListener('click', (e) => {
+        const btn = e.target.closest('button[data-action]');
+        if (!btn || btn.disabled) return;
+        e.stopPropagation();
+        const action = btn.dataset.action;
+        const dateKey = contextMenuDateKey;
+        hideContextMenu();
+        handleContextAction(action, dateKey);
+    });
+
+    // Don't let clicks inside the menu bubble up (would re-close it)
+    contextMenu.addEventListener('contextmenu', (e) => e.preventDefault());
+}
+
+function showContextMenu(x, y, dateKey) {
+    buildContextMenu();
+    contextMenuDateKey = dateKey;
+
+    const monthData = calendarData[currentYear] && calendarData[currentYear][currentMonth];
+    const hasImage = !!(monthData && monthData[dateKey]);
+    const canPaste = !!activeClipboardImage;
+
+    let html = '';
+    if (hasImage) {
+        html += `<button data-action="replace">Replace Image</button>`;
+        html += `<button data-action="copy">Copy Image</button>`;
+        if (canPaste) html += `<button data-action="paste">Paste Last Image</button>`;
+        html += `<hr>`;
+        html += `<button data-action="save">Save Image As…</button>`;
+        html += `<hr>`;
+        html += `<button data-action="remove" class="danger">Remove Image</button>`;
+    } else {
+        html += `<button data-action="upload">Upload Image</button>`;
+        if (canPaste) html += `<button data-action="paste">Paste Last Image</button>`;
+    }
+    contextMenu.innerHTML = html;
+
+    // Position at (0,0) first so we can measure it, then move into place
+    contextMenu.style.left = '0px';
+    contextMenu.style.top = '0px';
+    contextMenu.classList.add('show');
+
+    const rect = contextMenu.getBoundingClientRect();
+    const winW = window.innerWidth;
+    const winH = window.innerHeight;
+    const margin = 8;
+
+    let finalX = x;
+    let finalY = y;
+    if (x + rect.width + margin > winW) finalX = winW - rect.width - margin;
+    if (y + rect.height + margin > winH) finalY = winH - rect.height - margin;
+    if (finalX < margin) finalX = margin;
+    if (finalY < margin) finalY = margin;
+
+    contextMenu.style.left = `${finalX}px`;
+    contextMenu.style.top = `${finalY}px`;
+}
+
+function hideContextMenu() {
+    if (contextMenu && contextMenu.classList.contains('show')) {
+        contextMenu.classList.remove('show');
+    }
+    contextMenuDateKey = null;
+}
+
+function handleContextAction(action, dateKey) {
+    if (!dateKey) return;
+
+    // Re-query the live box — a re-render may have swapped the DOM node
+    const box = grid.querySelector(`[data-date-key="${dateKey}"]`);
+    if (!box) return;
+
+    const monthData = calendarData[currentYear] && calendarData[currentYear][currentMonth];
+    const currentImage = monthData ? monthData[dateKey] : null;
+
+    switch (action) {
+        case 'upload':
+        case 'replace':
+            targetDateKey = dateKey;
+            targetDayBox = box;
+            imageInput.click();
+            break;
+
+        case 'paste':
+            if (activeClipboardImage) {
+                applyImageToBox(dateKey, box, activeClipboardImage);
+            }
+            break;
+
+        case 'copy':
+            if (currentImage) {
+                activeClipboardImage = currentImage;
+                box.classList.add('shake');
+                setTimeout(() => box.classList.remove('shake'), 400);
+            }
+            break;
+
+        case 'save':
+            if (currentImage) saveImageAs(currentImage, dateKey);
+            break;
+
+        case 'remove':
+            if (monthData && monthData[dateKey]) {
+                delete monthData[dateKey];
+                box.style.backgroundImage = '';
+                const label = box.querySelector('.day-number');
+                if (label) label.style.opacity = '';
+                box.animate(
+                    [{ opacity: 0.25 }, { opacity: 1 }],
+                    { duration: 300, easing: 'ease-out' }
+                );
+            }
+            break;
+    }
+}
+
+async function saveImageAs(base64Image, dateKey) {
+    try {
+        // Convert the data URL into a Blob so we can save it as a real file
+        const res = await fetch(base64Image);
+        const blob = await res.blob();
+        const ext = (blob.type.split('/')[1] || 'png').replace('jpeg', 'jpg');
+        const filename = `asmr_${dateKey}.${ext}`;
+        await saveBlob(blob, filename, 'Image', { [blob.type]: ['.' + ext] });
+    } catch (err) {
+        console.error('Save image failed', err);
+        alert('Could not save image.');
+    }
 }
 
 // Start the app
