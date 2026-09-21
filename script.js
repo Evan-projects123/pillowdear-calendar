@@ -1,21 +1,15 @@
-/* 
-  State Management 
-*/
 let currentYear = new Date().getFullYear();
-let currentMonth = new Date().getMonth(); // 0-11
+let currentMonth = new Date().getMonth();
 let calendarData = {}; 
 let activeClipboardImage = null; 
 
-// Global variables for Firefox compatibility
 let targetDateKey = null;
 let targetDayBox = null;
 let imageInput = null; 
 
-// Context menu state
 let contextMenu = null;
 let contextMenuDateKey = null;
 
-// Year scroller config
 const YEAR_RANGE_START = new Date().getFullYear() - 10;
 const YEAR_RANGE_END = new Date().getFullYear() + 10;
 const YEAR_ITEM_HEIGHT = 40; 
@@ -27,10 +21,7 @@ const monthDisplay = document.getElementById('monthDisplay');
 const yearDropdown = document.getElementById('yearDropdown');
 const fileInput = document.getElementById('fileInput');
 
-// --- Initialization ---
-
 function init() {
-    // Setup persistent global image input to satisfy Firefox's security rules
     imageInput = document.createElement('input');
     imageInput.type = 'file';
     imageInput.accept = 'image/*';
@@ -46,11 +37,10 @@ function init() {
             applyImageToBox(targetDateKey, targetDayBox, activeClipboardImage);
         };
         reader.readAsDataURL(file);
-        imageInput.value = ''; // Reset so the same file can be chosen again later
+        imageInput.value = '';
     });
     document.body.appendChild(imageInput);
 
-    // Populate the scroller
     for (let y = YEAR_RANGE_START; y <= YEAR_RANGE_END; y++) {
         const span = document.createElement('span');
         span.textContent = y;
@@ -69,8 +59,6 @@ function init() {
     populateYearDropdown();
     setupEventListeners();
 }
-
-// --- Calendar Rendering & Animation ---
 
 function renderCalendar(animate = true, direction = 'next') {
     const newGrid = document.createElement('div');
@@ -108,7 +96,6 @@ function renderCalendar(animate = true, direction = 'next') {
             label.style.opacity = '0.5'; 
         }
 
-        // NOTE: click/contextmenu listeners are handled via event delegation
         newGrid.appendChild(dayBox);
     }
 
@@ -144,8 +131,6 @@ function renderCalendar(animate = true, direction = 'next') {
         grid.className = 'calendar-grid';
     }
 }
-
-// --- Image Handling & Animations ---
 
 function handleDayClick(event, dateKey, targetBox) {
     if (event.shiftKey && activeClipboardImage) {
@@ -199,8 +184,6 @@ function applyImageToBox(dateKey, targetBox, base64Image) {
     }, 600);
 }
 
-// --- Controls & Logic ---
-
 function setupEventListeners() {
     document.getElementById('prevMonth').addEventListener('click', () => {
         currentMonth--;
@@ -227,7 +210,6 @@ function setupEventListeners() {
         yearDropdown.classList.toggle('show');
     });
 
-    // Close the year dropdown and context menu when clicking anywhere
     window.addEventListener('click', () => {
         if (yearDropdown.classList.contains('show')) {
             yearDropdown.classList.remove('show');
@@ -240,14 +222,12 @@ function setupEventListeners() {
     document.getElementById('exportBtn').addEventListener('click', exportMonthAsPNG);
     fileInput.addEventListener('change', loadData);
 
-    // --- Delegated left-click for day boxes ---
     grid.addEventListener('click', (e) => {
         const box = e.target.closest('.day-box');
         if (!box || box.classList.contains('empty') || !box.dataset.dateKey) return;
         handleDayClick(e, box.dataset.dateKey, box);
     });
 
-    // --- Delegated right-click for day boxes ---
     grid.addEventListener('contextmenu', (e) => {
         const box = e.target.closest('.day-box');
         if (!box || box.classList.contains('empty') || !box.dataset.dateKey) return;
@@ -256,22 +236,18 @@ function setupEventListeners() {
         showContextMenu(e.clientX, e.clientY, box.dataset.dateKey);
     });
 
-    // Close context menu if right-clicking somewhere else
     window.addEventListener('contextmenu', (e) => {
         if (contextMenu && contextMenu.classList.contains('show') && !contextMenu.contains(e.target)) {
             hideContextMenu();
         }
     }, true);
 
-    // Dismiss on Escape, scroll, or tab blur
     document.addEventListener('keydown', (e) => {
         if (e.key === 'Escape') hideContextMenu();
     });
     window.addEventListener('scroll', hideContextMenu, true);
     window.addEventListener('blur', hideContextMenu);
 }
-
-// --- Year Scroller Logic ---
 
 function updateYearScroller(animate = true) {
     const index = currentYear - YEAR_RANGE_START;
@@ -305,8 +281,6 @@ function populateYearDropdown() {
         yearDropdown.appendChild(link);
     }
 }
-
-// --- File System (Save/Load) ---
 
 async function saveData() {
     const dataStr = JSON.stringify(calendarData);
@@ -356,8 +330,6 @@ function loadData(e) {
     fileInput.value = '';
 }
 
-// --- Shared Blob Save Helper ---
-
 async function saveBlob(blob, filename, description, accept) {
     if (window.showSaveFilePicker) {
         try {
@@ -384,8 +356,6 @@ async function saveBlob(blob, filename, description, accept) {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
 }
-
-// --- PNG Export ---
 
 function loadImage(src) {
     return new Promise((resolve, reject) => {
@@ -543,8 +513,6 @@ function drawRoundedRect(ctx, x, y, w, h, r) {
     ctx.closePath();
 }
 
-// --- Right-Click Context Menu ---
-
 function buildContextMenu() {
     if (contextMenu) return;
 
@@ -552,7 +520,6 @@ function buildContextMenu() {
     contextMenu.className = 'context-menu';
     document.body.appendChild(contextMenu);
 
-    // Handle clicks on menu items via delegation
     contextMenu.addEventListener('click', (e) => {
         const btn = e.target.closest('button[data-action]');
         if (!btn || btn.disabled) return;
@@ -563,7 +530,6 @@ function buildContextMenu() {
         handleContextAction(action, dateKey);
     });
 
-    // Don't let clicks inside the menu bubble up (would re-close it)
     contextMenu.addEventListener('contextmenu', (e) => e.preventDefault());
 }
 
@@ -590,7 +556,6 @@ function showContextMenu(x, y, dateKey) {
     }
     contextMenu.innerHTML = html;
 
-    // Position at (0,0) first so we can measure it, then move into place
     contextMenu.style.left = '0px';
     contextMenu.style.top = '0px';
     contextMenu.classList.add('show');
@@ -621,7 +586,6 @@ function hideContextMenu() {
 function handleContextAction(action, dateKey) {
     if (!dateKey) return;
 
-    // Re-query the live box — a re-render may have swapped the DOM node
     const box = grid.querySelector(`[data-date-key="${dateKey}"]`);
     if (!box) return;
 
@@ -671,7 +635,6 @@ function handleContextAction(action, dateKey) {
 
 async function saveImageAs(base64Image, dateKey) {
     try {
-        // Convert the data URL into a Blob so we can save it as a real file
         const res = await fetch(base64Image);
         const blob = await res.blob();
         const ext = (blob.type.split('/')[1] || 'png').replace('jpeg', 'jpg');
@@ -683,5 +646,4 @@ async function saveImageAs(base64Image, dateKey) {
     }
 }
 
-// Start the app
 init();
